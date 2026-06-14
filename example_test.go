@@ -3,7 +3,8 @@ package peanalyzer_test
 import (
 	"fmt"
 	"log"
-	"peanalyzer"
+
+	"github.com/eyobed101/peanalyzer"
 )
 
 // Example demonstrates how to integrate the package into another application.
