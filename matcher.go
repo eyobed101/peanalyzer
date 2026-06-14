@@ -2,16 +2,19 @@ package peanalyzer
 
 import (
 	"fmt"
+	"sort"
 )
 
 // Match represents a successful signature match at a specific location.
 type Match struct {
-	SignatureName string `json:"signature_name"`
-	Offset        int64  `json:"offset"`       // File offset where matched
-	RVA           uint32 `json:"rva"`          // Relative virtual address
-	SectionName   string `json:"section_name"` // Section containing the match
-	EpOnly        bool   `json:"ep_only"`      // Whether signature required EP scanning
-	MatchedBytes  []byte `json:"-"`            // Optional: first few bytes for debugging
+	SignatureName string  `json:"signature_name"`
+	Offset        int64   `json:"offset"`       // File offset where matched
+	RVA           uint32  `json:"rva"`          // Relative virtual address
+	SectionName   string  `json:"section_name"` // Section containing the match
+	EpOnly        bool    `json:"ep_only"`      // Whether signature required EP scanning
+	MatchedBytes  []byte  `json:"-"`            // Optional: first few bytes for debugging
+	Category      string  `json:"category"`     // Category of signature ("packer", "protector", "compiler", "installer")
+	Confidence    float64 `json:"confidence"`   // Confidence score
 }
 
 // AnalysisResult is the complete output of scanning a file.
@@ -30,9 +33,12 @@ type AnalysisResult struct {
 	LowEntropyInjections  []LowEntropyInjection     `json:"low_entropy_injections"`
 	CompressionEncryption []CompressionVsEncryption `json:"compression_encryption"`
 	// Hash-based detection
-	FileHash       string `json:"file_hash"`              // SHA256 of the scanned file
-	KnownMalicious bool   `json:"known_malicious"`        // true if hash matched the HashDB
-	HashMatch      string `json:"hash_match,omitempty"`   // source path of the HashDB that matched
+	FileHash       string `json:"file_hash"`            // SHA256 of the scanned file
+	KnownMalicious bool   `json:"known_malicious"`      // true if hash matched the HashDB
+	HashMatch      string `json:"hash_match,omitempty"` // source path of the HashDB that matched
+	// Category-specific matches
+	PackerMatches    []Match `json:"packer_matches"`
+	ProtectorMatches []Match `json:"protector_matches"`
 }
 
 // Scanner performs entropy and signature analysis on PE files.
@@ -88,6 +94,56 @@ func (s *Scanner) ScanFileWithMode(filePath string, mode string) (*AnalysisResul
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Compute confidence for each match
+	maxLen := 0
+	for _, sig := range s.signatures {
+		if sig.Length > maxLen {
+			maxLen = sig.Length
+		}
+	}
+	if maxLen == 0 {
+		maxLen = 64
+	}
+
+	sigMap := make(map[string]Signature, len(s.signatures))
+	for _, sig := range s.signatures {
+		sigMap[sig.Name] = sig
+	}
+
+	for i := range matches {
+		sig, exists := sigMap[matches[i].SignatureName]
+		if exists {
+			matches[i].Category = sig.Category
+			factorCategory := 0.5
+			if sig.Category == "packer" {
+				factorCategory = 1.0
+			}
+			factorEpOnly := 0.8
+			if sig.EpOnly {
+				factorEpOnly = 1.0
+			}
+			matches[i].Confidence = (float64(sig.Length) / float64(maxLen)) * factorCategory * factorEpOnly
+		}
+	}
+
+	// Sort matches by confidence descending
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].Confidence != matches[j].Confidence {
+			return matches[i].Confidence > matches[j].Confidence
+		}
+		return matches[i].SignatureName < matches[j].SignatureName
+	})
+
+	var packerMatches []Match
+	var protectorMatches []Match
+	for _, m := range matches {
+		if m.Category == "packer" {
+			packerMatches = append(packerMatches, m)
+		} else if m.Category == "protector" {
+			protectorMatches = append(protectorMatches, m)
+		}
 	}
 
 	// Detect entropy anomalies
@@ -177,6 +233,8 @@ func (s *Scanner) ScanFileWithMode(filePath string, mode string) (*AnalysisResul
 		FileHash:              fileHash,
 		KnownMalicious:        knownMalicious,
 		HashMatch:             hashMatchSource,
+		PackerMatches:         packerMatches,
+		ProtectorMatches:      protectorMatches,
 	}, nil
 }
 
@@ -191,14 +249,19 @@ func (s *Scanner) scanEntryPoint(target *PETarget) ([]Match, error) {
 		return nil, fmt.Errorf("failed to read EP data: %w", err)
 	}
 
+	seen := make(map[string]bool)
 	for _, sig := range s.signatures {
+		if sig.Length < 12 {
+			continue
+		}
+		if sig.Category == "compiler" || sig.Category == "installer" {
+			continue
+		}
 		if !sig.EpOnly {
-			// In ep_only mode we still only scan EP region, but we skip signatures that
-			// are not marked ep_only? Actually PEiD in ep_only mode only scans signatures
-			// that have ep_only=true. But we'll scan all signatures at EP if user requests EP mode.
-			// We'll follow: in "ep_only" mode, only consider signatures where EpOnly==true.
-			// But for flexibility, we'll allow all signatures at EP location.
-			// We'll keep as is for now.
+			continue
+		}
+		if seen[sig.Name] {
+			continue
 		}
 		for offset := 0; offset <= len(epData)-sig.Length; offset++ {
 			if sig.Match(epData, offset) {
@@ -211,6 +274,7 @@ func (s *Scanner) scanEntryPoint(target *PETarget) ([]Match, error) {
 					SectionName:   target.SectionNameFromRVA(rva),
 					EpOnly:        sig.EpOnly,
 				})
+				seen[sig.Name] = true
 				// Break after first match per signature at EP area (typical PEiD behavior)
 				break
 			}
@@ -222,15 +286,23 @@ func (s *Scanner) scanEntryPoint(target *PETarget) ([]Match, error) {
 // scanAllSections scans every section of the PE file for all signatures.
 func (s *Scanner) scanAllSections(target *PETarget) ([]Match, error) {
 	var matches []Match
+	seen := make(map[string]bool)
 	for _, section := range target.File.Sections {
 		data, err := target.SectionData(section)
 		if err != nil {
 			continue // skip unreadable sections
 		}
 		for _, sig := range s.signatures {
+			if sig.Length < 8 {
+				continue
+			}
 			if sig.EpOnly {
 				// EpOnly signatures should only be scanned at EP, skip in all_sections mode.
 				// But some tools still scan them. We'll skip them to match PEiD default.
+				continue
+			}
+			key := sig.Name + ":" + section.Name
+			if seen[key] {
 				continue
 			}
 			for offset := 0; offset <= len(data)-sig.Length; offset++ {
@@ -244,6 +316,7 @@ func (s *Scanner) scanAllSections(target *PETarget) ([]Match, error) {
 						SectionName:   section.Name,
 						EpOnly:        false,
 					})
+					seen[key] = true
 					// Break after first match in this section for this signature
 					break
 				}
@@ -261,7 +334,14 @@ func (s *Scanner) scanRawFile(target *PETarget) ([]Match, error) {
 		return nil, fmt.Errorf("failed to read raw file: %w", err)
 	}
 	var matches []Match
+	seen := make(map[string]bool)
 	for _, sig := range s.signatures {
+		if sig.Length < 8 {
+			continue
+		}
+		if seen[sig.Name] {
+			continue
+		}
 		for offset := 0; offset <= len(rawData)-sig.Length; offset++ {
 			if sig.Match(rawData, offset) {
 				rva, _ := target.RVAFromFileOffset(int64(offset))
@@ -272,6 +352,7 @@ func (s *Scanner) scanRawFile(target *PETarget) ([]Match, error) {
 					SectionName:   target.SectionNameFromRVA(rva),
 					EpOnly:        sig.EpOnly,
 				})
+				seen[sig.Name] = true
 				// break after first occurrence? PEiD reports first match only per signature.
 				// We'll break to avoid flooding.
 				break

@@ -62,8 +62,8 @@ func Example_entropyOnly() {
 
 // Example_signatureOnly shows how to match raw byte slices.
 func Example_signatureOnly() {
-	sig, _ := peanalyzer.NewSignature("TestSig", "55 8B EC 6A FF ??", false)
-	data := []byte{0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x00, 0x00}
+	sig, _ := peanalyzer.NewSignature("TestSig", "55 8B EC 6A FF ?? ?? ??", false)
+	data := []byte{0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x00, 0x00, 0x00}
 	if sig.Match(data, 0) {
 		fmt.Println("Signature matched at offset 0")
 	}

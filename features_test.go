@@ -1,6 +1,7 @@
 package peanalyzer
 
 import (
+	"debug/pe"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -277,20 +278,36 @@ func TestAdvancedFeatures(t *testing.T) {
 	}
 
 	// 4. Test DetectCascadingPacking
+	// Add a mock second section to target to test multi-section cascading layers
+	if target.File != nil {
+		importSection := &pe.Section{
+			SectionHeader: pe.SectionHeader{
+				Name:             ".data",
+				VirtualSize:      0x1000,
+				VirtualAddress:   0x2000,
+				Size:             512,
+				Offset:           0x300,
+			},
+		}
+		target.File.Sections = append(target.File.Sections, importSection)
+	}
+
 	sigs := []Signature{
 		{
-			Name:   "UPX packer",
-			Mask:   []byte{0x00, 0x00, 0x00},
-			Values: []byte{0x00, 0x00, 0x00},
-			Length: 3,
-			EpOnly: false,
+			Name:     "UPX packer",
+			Mask:     []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Values:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Length:   8,
+			EpOnly:   false,
+			Category: "packer",
 		},
 		{
-			Name:   "Themida protector",
-			Mask:   []byte{0x00, 0x00, 0x00},
-			Values: []byte{0x00, 0x00, 0x00},
-			Length: 3,
-			EpOnly: false,
+			Name:     "FSG packer",
+			Mask:     []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Values:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Length:   8,
+			EpOnly:   false,
+			Category: "packer",
 		},
 	}
 	cascadeRes, err := target.DetectCascadingPacking(sigs)
@@ -389,4 +406,107 @@ func TestHashDB(t *testing.T) {
 		t.Errorf("expected HashMatch to be %q, got %q", hashDBPath, resultUpdated.HashMatch)
 	}
 }
+
+func TestCleanHeuristics(t *testing.T) {
+	// Test inferCategory
+	if inferCategory("UPX v0.89") != "packer" {
+		t.Errorf("expected UPX to be packer")
+	}
+	if inferCategory("Themida protector") != "protector" {
+		t.Errorf("expected Themida to be protector")
+	}
+	if inferCategory("Microsoft Visual C++") != "compiler" {
+		t.Errorf("expected VC++ to be compiler")
+	}
+	if inferCategory("Nullsoft Installer") != "installer" {
+		t.Errorf("expected Nullsoft to be installer")
+	}
+
+	// Test strict NewSignature token and length checks
+	_, err := NewSignature("Short", "55 8B", false)
+	if err == nil {
+		t.Errorf("expected error for too-short pattern (length < 8 bytes)")
+	}
+
+	_, err = NewSignature("InvalidToken", "55 8B EC 6A FF 68 8 ??", false)
+	if err == nil {
+		t.Errorf("expected error for invalid single-digit token '8'")
+	}
+
+	sigValid, err := NewSignature("Valid", "55 8B EC 6A FF 68 00 00", false)
+	if err != nil {
+		t.Fatalf("expected no error for valid signature, got: %v", err)
+	}
+	if sigValid.Length != 8 {
+		t.Errorf("expected length 8, got %d", sigValid.Length)
+	}
+
+	// Test ep_only scan filters
+	tempDir, err := os.MkdirTemp("", "peanalyzer_test_clean")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	peBytes := createTinyPEBytes()
+	filePath := filepath.Join(tempDir, "test.exe")
+	if err := os.WriteFile(filePath, peBytes, 0644); err != nil {
+		t.Fatalf("failed to write test PE: %v", err)
+	}
+
+	// Signatures for scanning
+	sigs := []Signature{
+		{
+			Name:     "EP Packer (long)",
+			Mask:     []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Values:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Length:   12,
+			EpOnly:   true,
+			Category: "packer",
+		},
+		{
+			Name:     "EP Compiler (long but ignored)",
+			Mask:     []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Values:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Length:   12,
+			EpOnly:   true,
+			Category: "compiler",
+		},
+		{
+			Name:     "EP Packer (too short)",
+			Mask:     []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Values:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Length:   10,
+			EpOnly:   true,
+			Category: "packer",
+		},
+		{
+			Name:     "Not EP Only Packer (skipped in ep_only)",
+			Mask:     []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Values:   []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			Length:   12,
+			EpOnly:   false,
+			Category: "packer",
+		},
+	}
+
+	scanner := NewScanner(sigs)
+	result, err := scanner.ScanFileWithMode(filePath, "ep_only")
+	if err != nil {
+		t.Fatalf("scan ep_only failed: %v", err)
+	}
+
+	// Only "EP Packer (long)" should match
+	if len(result.Matches) != 1 {
+		t.Errorf("expected exactly 1 match in ep_only mode, got %d", len(result.Matches))
+	} else if result.Matches[0].SignatureName != "EP Packer (long)" {
+		t.Errorf("expected match to be 'EP Packer (long)', got %s", result.Matches[0].SignatureName)
+	}
+
+	// Verify confidence calculation
+	if result.Matches[0].Confidence <= 0 {
+		t.Errorf("expected positive confidence score, got %f", result.Matches[0].Confidence)
+	}
+}
+
 
