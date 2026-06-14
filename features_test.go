@@ -1,6 +1,7 @@
 package peanalyzer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -301,6 +302,91 @@ func TestAdvancedFeatures(t *testing.T) {
 	}
 	if len(cascadeRes.Layers) < 2 {
 		t.Errorf("expected at least 2 layers, got %d", len(cascadeRes.Layers))
+	}
+}
+
+func TestHashDB(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "peanalyzer_test_hashdb")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	hashDBPath := filepath.Join(tempDir, "hashes.json")
+	// Write a valid hash DB JSON file
+	jsonContent := `{
+		"f88876426b1d7b574f49b9ecf2020dba8a1ef86d4b8fd7b2627ed24b7f9c3029": "malware1",
+		"0000000000000000000000000000000000000000000000000000000000000000": null,
+		"invalid-hash": "skipped"
+	}`
+	if err := os.WriteFile(hashDBPath, []byte(jsonContent), 0644); err != nil {
+		t.Fatalf("failed to write test hash DB: %v", err)
+	}
+
+	db, err := LoadHashDB(hashDBPath)
+	if err != nil {
+		t.Fatalf("LoadHashDB failed: %v", err)
+	}
+
+	// It should skip "invalid-hash", and store the other two valid 64-char hashes.
+	if db.Len() != 2 {
+		t.Errorf("expected db length 2, got %d", db.Len())
+	}
+
+	if !db.Contains("f88876426b1d7b574f49b9ecf2020dba8a1ef86d4b8fd7b2627ed24b7f9c3029") {
+		t.Errorf("expected db to contain hash")
+	}
+
+	if db.Contains("invalid-hash") {
+		t.Errorf("expected db not to contain invalid-hash")
+	}
+
+	if db.SourcePath() != hashDBPath {
+		t.Errorf("expected source path %q, got %q", hashDBPath, db.SourcePath())
+	}
+
+	// Verify integration with ScanFileWithMode
+	peBytes := createTinyPEBytes()
+	filePath := filepath.Join(tempDir, "test.exe")
+	if err := os.WriteFile(filePath, peBytes, 0644); err != nil {
+		t.Fatalf("failed to write test PE: %v", err)
+	}
+
+	// Create scanner, attach hash DB, and scan
+	scanner := NewScanner(nil).WithHashDB(db)
+	result, err := scanner.ScanFileWithMode(filePath, "all_sections")
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if result.FileHash == "" {
+		t.Errorf("expected FileHash to be computed")
+	}
+
+	// Write the actual hash to our hash DB JSON, reload, and verify known_malicious is true
+	actualHash := result.FileHash
+	jsonContentWithActual := fmt.Sprintf(`{"%s": "actual-malware"}`, actualHash)
+	if err := os.WriteFile(hashDBPath, []byte(jsonContentWithActual), 0644); err != nil {
+		t.Fatalf("failed to write updated test hash DB: %v", err)
+	}
+
+	dbUpdated, err := LoadHashDB(hashDBPath)
+	if err != nil {
+		t.Fatalf("LoadHashDB reload failed: %v", err)
+	}
+
+	scannerUpdated := NewScanner(nil).WithHashDB(dbUpdated)
+	resultUpdated, err := scannerUpdated.ScanFileWithMode(filePath, "all_sections")
+	if err != nil {
+		t.Fatalf("scan with updated hash DB failed: %v", err)
+	}
+
+	if !resultUpdated.KnownMalicious {
+		t.Errorf("expected KnownMalicious to be true")
+	}
+
+	if resultUpdated.HashMatch != hashDBPath {
+		t.Errorf("expected HashMatch to be %q, got %q", hashDBPath, resultUpdated.HashMatch)
 	}
 }
 

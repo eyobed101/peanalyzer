@@ -29,16 +29,28 @@ type AnalysisResult struct {
 	IATStatus             *IATStatus                `json:"iat_status"`
 	LowEntropyInjections  []LowEntropyInjection     `json:"low_entropy_injections"`
 	CompressionEncryption []CompressionVsEncryption `json:"compression_encryption"`
+	// Hash-based detection
+	FileHash       string `json:"file_hash"`              // SHA256 of the scanned file
+	KnownMalicious bool   `json:"known_malicious"`        // true if hash matched the HashDB
+	HashMatch      string `json:"hash_match,omitempty"`   // source path of the HashDB that matched
 }
 
 // Scanner performs entropy and signature analysis on PE files.
 type Scanner struct {
 	signatures []Signature
+	hashDB     *HashDB // optional – for hash-based malicious file detection
 }
 
 // NewScanner creates a scanner with the given signatures.
 func NewScanner(signatures []Signature) *Scanner {
 	return &Scanner{signatures: signatures}
+}
+
+// WithHashDB attaches a HashDB to the scanner and returns the scanner for chaining.
+// When set, every scan computes the file's SHA256 and checks it against the database.
+func (s *Scanner) WithHashDB(db *HashDB) *Scanner {
+	s.hashDB = db
+	return s
 }
 
 // ScanFile analyzes a PE file using default settings (all sections, EP scan).
@@ -133,6 +145,21 @@ func (s *Scanner) ScanFileWithMode(filePath string, mode string) (*AnalysisResul
 		}
 	}
 
+	// Hash-based known-malicious detection
+	var fileHash string
+	var knownMalicious bool
+	var hashMatchSource string
+	if s.hashDB != nil {
+		h, err := target.SHA256()
+		if err == nil {
+			fileHash = h
+			if s.hashDB.Contains(h) {
+				knownMalicious = true
+				hashMatchSource = s.hashDB.SourcePath()
+			}
+		}
+	}
+
 	return &AnalysisResult{
 		FilePath:              filePath,
 		EntropyInfo:           entropyInfo,
@@ -147,6 +174,9 @@ func (s *Scanner) ScanFileWithMode(filePath string, mode string) (*AnalysisResul
 		IATStatus:             iatStatus,
 		LowEntropyInjections:  lowEntropyInjections,
 		CompressionEncryption: compEnc,
+		FileHash:              fileHash,
+		KnownMalicious:        knownMalicious,
+		HashMatch:             hashMatchSource,
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package peanalyzer
 
 import (
+	"crypto/sha256"
 	"debug/pe"
 	"encoding/hex"
 	"errors"
@@ -215,4 +216,16 @@ func (p *PETarget) DetectOverlay() (*OverlayInfo, error) {
 
 	return overlay, nil
 }
+
+// SHA256 returns the lowercase hex-encoded SHA256 hash of the entire raw PE file.
+// This is used for hash-based known-malicious detection against a HashDB.
+func (p *PETarget) SHA256() (string, error) {
+	data, err := p.RawFileData()
+	if err != nil {
+		return "", fmt.Errorf("read file for SHA256: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 
