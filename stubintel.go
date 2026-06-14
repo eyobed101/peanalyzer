@@ -16,11 +16,15 @@ type AntiAnalysisCheck struct {
 
 // StubIntelResult summarizes the results of the stub anti-analysis scanning.
 type StubIntelResult struct {
-	HasAntiDebug      bool                `json:"has_anti_debug"`
-	HasAntiVM         bool                `json:"has_anti_vm"`
-	HasSandboxEvasion bool                `json:"has_sandbox_evasion"`
-	Checks            []AntiAnalysisCheck `json:"checks"`
-	StubSection       string              `json:"stub_section"`
+	HasAntiDebug            bool                `json:"has_anti_debug"`
+	HasAntiVM               bool                `json:"has_anti_vm"`
+	HasSandboxEvasion       bool                `json:"has_sandbox_evasion"`
+	Checks                  []AntiAnalysisCheck `json:"checks"`
+	StubSection             string              `json:"stub_section"`
+	HasAdvancedDelay        bool                `json:"has_advanced_delay"`
+	AdvancedDelayAPIs       []string            `json:"advanced_delay_apis"`
+	HasUserInteractionCheck bool                `json:"has_user_interaction_check"`
+	UserInteractionAPIs     []string            `json:"user_interaction_apis"`
 }
 
 var antiDebugAPIs = map[string]string{
@@ -46,6 +50,21 @@ var sandboxEvasionAPIs = map[string]string{
 	"GetDiskFreeSpaceEx": "Checks disk size to detect typical small sandbox environments",
 }
 
+var delayAPIs = map[string]string{
+	"NtDelayExecution":       "Kernel-mode delay (more evasive than Sleep)",
+	"WaitForSingleObject":    "Can wait on a timer object",
+	"WaitForMultipleObjects": "Advanced waiting",
+	"SetTimer":               "Timer-based delay",
+	"timeSetEvent":           "Multimedia timer delay",
+}
+
+var userAPIs = map[string]string{
+	"GetCursorPos":        "Checks for mouse movement",
+	"GetAsyncKeyState":    "Checks keyboard state",
+	"GetForegroundWindow": "Detects active window",
+	"BlockInput":          "May indicate user activity requirement",
+}
+
 func matchAPI(importedName string, baseName string) bool {
 	return importedName == baseName || importedName == baseName+"A" || importedName == baseName+"W"
 }
@@ -53,7 +72,9 @@ func matchAPI(importedName string, baseName string) bool {
 // AnalyzeStub scans the entry point section (unpacking stub) for imports and byte patterns that indicate evasion techniques.
 func (p *PETarget) AnalyzeStub() (*StubIntelResult, error) {
 	result := &StubIntelResult{
-		Checks: []AntiAnalysisCheck{},
+		Checks:              []AntiAnalysisCheck{},
+		AdvancedDelayAPIs:   []string{},
+		UserInteractionAPIs: []string{},
 	}
 
 	// Find section containing the entry point RVA
@@ -118,14 +139,40 @@ func (p *PETarget) AnalyzeStub() (*StubIntelResult, error) {
 			for api, desc := range sandboxEvasionAPIs {
 				if matchAPI(imp, api) {
 					result.HasSandboxEvasion = true
-					severity := "medium"
-					if api == "Sleep" {
-						severity = "low"
+					severity := "low"
+					if api == "NtDelayExecution" {
+						severity = "medium"
 					}
 					result.Checks = append(result.Checks, AntiAnalysisCheck{
 						Type:        "sandbox_evasion",
 						Match:       imp,
 						Severity:    severity,
+						Description: desc,
+					})
+				}
+			}
+			for api, desc := range delayAPIs {
+				if matchAPI(imp, api) {
+					result.HasAdvancedDelay = true
+					result.AdvancedDelayAPIs = append(result.AdvancedDelayAPIs, imp)
+					result.HasSandboxEvasion = true
+					result.Checks = append(result.Checks, AntiAnalysisCheck{
+						Type:        "sandbox_evasion",
+						Match:       imp,
+						Severity:    "high",
+						Description: desc,
+					})
+				}
+			}
+			for api, desc := range userAPIs {
+				if matchAPI(imp, api) {
+					result.HasUserInteractionCheck = true
+					result.UserInteractionAPIs = append(result.UserInteractionAPIs, imp)
+					result.HasSandboxEvasion = true
+					result.Checks = append(result.Checks, AntiAnalysisCheck{
+						Type:        "sandbox_evasion",
+						Match:       imp,
+						Severity:    "medium",
 						Description: desc,
 					})
 				}
@@ -146,6 +193,7 @@ func (p *PETarget) AnalyzeStub() (*StubIntelResult, error) {
 		{"0fa2", "cpuid", "anti_vm", "medium", "CPU ID query to detect virtualization/hypervisor signature"},
 		{"0f01", "sidt/sgdt", "anti_vm", "high", "Store Interrupt/Global Descriptor Table instruction often used to detect VMs"},
 		{"ed", "in eax, dx", "anti_vm", "high", "Input from port instruction often used to detect VMware VM ports"},
+		{"ebfe", "jmp self", "sandbox_evasion", "medium", "Infinite loop (jmp self) pattern used to stall execution / bypass sandbox analysis"},
 	}
 
 	for _, pattern := range bytePatterns {

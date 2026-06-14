@@ -204,3 +204,103 @@ func TestOverlayAndStubIntel(t *testing.T) {
 		t.Errorf("expected check for int3")
 	}
 }
+
+func TestAdvancedFeatures(t *testing.T) {
+	// 1. Test AnalyzeCompressionVsEncryption with random data (likely encrypted)
+	randomData := make([]byte, 2048)
+	for i := range randomData {
+		randomData[i] = byte(i % 256) // high entropy, uniform
+	}
+	resEnc := AnalyzeCompressionVsEncryption(randomData)
+	if resEnc == nil {
+		t.Fatalf("expected non-nil result from AnalyzeCompressionVsEncryption")
+	}
+	if !resEnc.LikelyEncrypted {
+		t.Errorf("expected random data to be classified as likely encrypted (entropy: %.2f)", resEnc.Entropy)
+	}
+
+	// 2. Test DetectLowEntropyInjections
+	tempDir, err := os.MkdirTemp("", "peanalyzer_test_low")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Build PE with one high entropy section containing a low entropy region
+	peBytes := createTinyPEBytes()
+	// Let's modify the section size in the PE bytes to be 2048 bytes (0x800) instead of 512 (0x200)
+	// PointerToRawData = 0x200
+	// SizeOfRawData at 0x138+16 = 0x800 (2048 bytes)
+	peBytes[0x138+16] = 0x00
+	peBytes[0x138+17] = 0x08
+
+	// Re-slice and build the PE data to have 0x200 + 0x800 = 0xA00 (2560 bytes)
+	peBytes = peBytes[:0x200]
+	sectionData := make([]byte, 2048)
+	// Fill first 1792 bytes with high entropy data
+	for i := 0; i < 1792; i++ {
+		sectionData[i] = byte(i % 256)
+	}
+	// Leave last 256 bytes as 0x00 (low entropy injection)
+	peBytes = append(peBytes, sectionData...)
+
+	filePath := filepath.Join(tempDir, "test_low.exe")
+	if err := os.WriteFile(filePath, peBytes, 0644); err != nil {
+		t.Fatalf("failed to write test PE: %v", err)
+	}
+
+	target, err := OpenPETarget(filePath)
+	if err != nil {
+		t.Fatalf("failed to open test PE: %v", err)
+	}
+	defer target.Close()
+
+	injections, err := target.DetectLowEntropyInjections()
+	if err != nil {
+		t.Fatalf("DetectLowEntropyInjections failed: %v", err)
+	}
+	if len(injections) != 1 {
+		t.Fatalf("expected exactly 1 low-entropy injection, got %d", len(injections))
+	}
+	if injections[0].SectionName != ".text" {
+		t.Errorf("expected injection in .text, got %s", injections[0].SectionName)
+	}
+
+	// 3. Test AnalyzeIAT on a PE with no imports
+	iat := target.AnalyzeIAT()
+	if !iat.IsTampered {
+		t.Errorf("expected IAT to be marked as tampered due to missing imports")
+	}
+	if !iat.MissingIAT {
+		t.Errorf("expected MissingIAT to be true")
+	}
+
+	// 4. Test DetectCascadingPacking
+	sigs := []Signature{
+		{
+			Name:   "UPX packer",
+			Mask:   []byte{0x00, 0x00, 0x00},
+			Values: []byte{0x00, 0x00, 0x00},
+			Length: 3,
+			EpOnly: false,
+		},
+		{
+			Name:   "Themida protector",
+			Mask:   []byte{0x00, 0x00, 0x00},
+			Values: []byte{0x00, 0x00, 0x00},
+			Length: 3,
+			EpOnly: false,
+		},
+	}
+	cascadeRes, err := target.DetectCascadingPacking(sigs)
+	if err != nil {
+		t.Fatalf("DetectCascadingPacking failed: %v", err)
+	}
+	if !cascadeRes.IsCascading {
+		t.Errorf("expected cascading packing to be detected")
+	}
+	if len(cascadeRes.Layers) < 2 {
+		t.Errorf("expected at least 2 layers, got %d", len(cascadeRes.Layers))
+	}
+}
+

@@ -107,3 +107,50 @@ func DetectEntropyAnomalies(sections []SectionEntropyResult) []EntropyAnomaly {
 	return anomalies
 }
 
+// LowEntropyInjection details a small window with significantly low entropy in a high-entropy section.
+type LowEntropyInjection struct {
+	SectionName            string  `json:"section_name"`
+	OverallEntropy         float64 `json:"overall_entropy"`
+	LowEntropyRegionOffset int64   `json:"low_entropy_region_offset"`
+	LowEntropyRegionSize   int     `json:"low_entropy_region_size"`
+	RegionEntropy          float64 `json:"region_entropy"`
+	Suspicious             bool    `json:"suspicious"`
+}
+
+// DetectLowEntropyInjections scans each section for small windows with entropy significantly lower than the section's overall entropy.
+func (p *PETarget) DetectLowEntropyInjections() ([]LowEntropyInjection, error) {
+	injections := []LowEntropyInjection{}
+	const windowSize = 256       // bytes
+	const entropyThreshold = 4.0 // if region entropy < overall - 2.5 and region entropy < entropyThreshold
+	for _, section := range p.File.Sections {
+		data, err := p.SectionData(section)
+		if err != nil || len(data) < windowSize {
+			continue
+		}
+		overall := CalculateEntropy(data)
+		if overall < 6.0 {
+			// Only scan high‑entropy sections (potential packed areas)
+			continue
+		}
+		// Slide a window over the section
+		for start := 0; start <= len(data)-windowSize; start += windowSize / 2 { // 50% overlap
+			window := data[start : start+windowSize]
+			regionEntropy := CalculateEntropy(window)
+			if regionEntropy < entropyThreshold && (overall-regionEntropy) > 2.5 {
+				injections = append(injections, LowEntropyInjection{
+					SectionName:            section.Name,
+					OverallEntropy:         overall,
+					LowEntropyRegionOffset: int64(section.Offset) + int64(start),
+					LowEntropyRegionSize:   windowSize,
+					RegionEntropy:          regionEntropy,
+					Suspicious:             true,
+				})
+				// Only report one per section to avoid spam
+				break
+			}
+		}
+	}
+	return injections, nil
+}
+
+

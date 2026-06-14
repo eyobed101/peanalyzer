@@ -16,15 +16,19 @@ type Match struct {
 
 // AnalysisResult is the complete output of scanning a file.
 type AnalysisResult struct {
-	FilePath          string            `json:"file_path"`
-	EntropyInfo       *EntropyInfo      `json:"entropy"`
-	Matches           []Match           `json:"matches"`
-	ScanMode          string            `json:"scan_mode"` // "ep_only", "all_sections", "raw"
-	TotalSignatures   int               `json:"total_signatures_loaded"`
-	EntropyAnomalies  []EntropyAnomaly  `json:"entropy_anomalies"`
-	SizeDiscrepancies []SizeDiscrepancy `json:"size_discrepancies"`
-	Overlay           *OverlayInfo      `json:"overlay"`
-	StubIntelligence  *StubIntelResult  `json:"stub_intelligence"`
+	FilePath              string                    `json:"file_path"`
+	EntropyInfo           *EntropyInfo              `json:"entropy"`
+	Matches               []Match                   `json:"matches"`
+	ScanMode              string                    `json:"scan_mode"` // "ep_only", "all_sections", "raw"
+	TotalSignatures       int                       `json:"total_signatures_loaded"`
+	EntropyAnomalies      []EntropyAnomaly          `json:"entropy_anomalies"`
+	SizeDiscrepancies     []SizeDiscrepancy         `json:"size_discrepancies"`
+	Overlay               *OverlayInfo              `json:"overlay"`
+	StubIntelligence      *StubIntelResult          `json:"stub_intelligence"`
+	CascadingPacking      *CascadingResult          `json:"cascading_packing"`
+	IATStatus             *IATStatus                `json:"iat_status"`
+	LowEntropyInjections  []LowEntropyInjection     `json:"low_entropy_injections"`
+	CompressionEncryption []CompressionVsEncryption `json:"compression_encryption"`
 }
 
 // Scanner performs entropy and signature analysis on PE files.
@@ -98,16 +102,51 @@ func (s *Scanner) ScanFileWithMode(filePath string, mode string) (*AnalysisResul
 		stubIntel = nil
 	}
 
+	// Detect cascading packing
+	cascadingPacking, err := target.DetectCascadingPacking(s.signatures)
+	if err != nil {
+		cascadingPacking = nil
+	}
+
+	// Analyze Import Address Table
+	iatStatus := target.AnalyzeIAT()
+
+	// Detect low-entropy injections
+	lowEntropyInjections, err := target.DetectLowEntropyInjections()
+	if err != nil {
+		lowEntropyInjections = []LowEntropyInjection{}
+	}
+
+	// Analyze compression vs encryption
+	compEnc := []CompressionVsEncryption{}
+	for _, sec := range target.File.Sections {
+		secData, err := target.SectionData(sec)
+		if err != nil || len(secData) == 0 {
+			continue
+		}
+		if CalculateEntropy(secData) > 7.0 {
+			res := AnalyzeCompressionVsEncryption(secData)
+			if res != nil {
+				res.SectionName = sec.Name
+				compEnc = append(compEnc, *res)
+			}
+		}
+	}
+
 	return &AnalysisResult{
-		FilePath:          filePath,
-		EntropyInfo:       entropyInfo,
-		Matches:           matches,
-		ScanMode:          mode,
-		TotalSignatures:   len(s.signatures),
-		EntropyAnomalies:  anomalies,
-		SizeDiscrepancies: sizeDiscrepancies,
-		Overlay:           overlay,
-		StubIntelligence:  stubIntel,
+		FilePath:              filePath,
+		EntropyInfo:           entropyInfo,
+		Matches:               matches,
+		ScanMode:              mode,
+		TotalSignatures:       len(s.signatures),
+		EntropyAnomalies:      anomalies,
+		SizeDiscrepancies:     sizeDiscrepancies,
+		Overlay:               overlay,
+		StubIntelligence:      stubIntel,
+		CascadingPacking:      cascadingPacking,
+		IATStatus:             iatStatus,
+		LowEntropyInjections:  lowEntropyInjections,
+		CompressionEncryption: compEnc,
 	}, nil
 }
 
