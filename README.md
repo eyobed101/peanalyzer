@@ -19,7 +19,7 @@
 To add `peanalyzer` to your project, simply import it:
 
 ```bash
-go get github.com/eyobed101/peanalyzer
+go install github.com/eyobed101/peanalyzer@latest
 ```
 
 Then, import it in your code:
