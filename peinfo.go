@@ -2,6 +2,7 @@ package peanalyzer
 
 import (
 	"debug/pe"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -162,3 +163,56 @@ func (p *PETarget) SectionNameFromRVA(rva uint32) string {
 	}
 	return ""
 }
+
+// OverlayInfo details extra bytes appended to the end of a PE file.
+type OverlayInfo struct {
+	Exists  bool   `json:"exists"`
+	Offset  int64  `json:"offset"`
+	Size    int64  `json:"size"`
+	First16 []byte `json:"first_16"`
+	HexDump string `json:"hex_dump"`
+}
+
+// DetectOverlay scans the PE file to determine if extra bytes are appended after the last section.
+func (p *PETarget) DetectOverlay() (*OverlayInfo, error) {
+	info, err := os.Stat(p.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat PE file: %w", err)
+	}
+	fileSize := info.Size()
+
+	var maxEnd int64
+	for _, section := range p.File.Sections {
+		endOffset := int64(section.Offset) + int64(section.Size)
+		if endOffset > maxEnd {
+			maxEnd = endOffset
+		}
+	}
+
+	overlay := &OverlayInfo{
+		Exists: false,
+	}
+
+	if fileSize > maxEnd {
+		overlay.Exists = true
+		overlay.Offset = maxEnd
+		overlay.Size = fileSize - maxEnd
+
+		readSize := int64(16)
+		if overlay.Size < readSize {
+			readSize = overlay.Size
+		}
+
+		first16 := make([]byte, readSize)
+		_, err := p.RawReader.ReadAt(first16, maxEnd)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("read overlay data: %w", err)
+		}
+
+		overlay.First16 = first16
+		overlay.HexDump = hex.EncodeToString(first16)
+	}
+
+	return overlay, nil
+}
+

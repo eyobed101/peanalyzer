@@ -16,11 +16,15 @@ type Match struct {
 
 // AnalysisResult is the complete output of scanning a file.
 type AnalysisResult struct {
-	FilePath        string       `json:"file_path"`
-	EntropyInfo     *EntropyInfo `json:"entropy"`
-	Matches         []Match      `json:"matches"`
-	ScanMode        string       `json:"scan_mode"` // "ep_only", "all_sections", "raw"
-	TotalSignatures int          `json:"total_signatures_loaded"`
+	FilePath          string            `json:"file_path"`
+	EntropyInfo       *EntropyInfo      `json:"entropy"`
+	Matches           []Match           `json:"matches"`
+	ScanMode          string            `json:"scan_mode"` // "ep_only", "all_sections", "raw"
+	TotalSignatures   int               `json:"total_signatures_loaded"`
+	EntropyAnomalies  []EntropyAnomaly  `json:"entropy_anomalies"`
+	SizeDiscrepancies []SizeDiscrepancy `json:"size_discrepancies"`
+	Overlay           *OverlayInfo      `json:"overlay"`
+	StubIntelligence  *StubIntelResult  `json:"stub_intelligence"`
 }
 
 // Scanner performs entropy and signature analysis on PE files.
@@ -70,12 +74,40 @@ func (s *Scanner) ScanFileWithMode(filePath string, mode string) (*AnalysisResul
 		return nil, err
 	}
 
+	// Detect entropy anomalies
+	var anomalies []EntropyAnomaly
+	if entropyInfo != nil {
+		anomalies = DetectEntropyAnomalies(entropyInfo.Sections)
+	}
+
+	// Check for size discrepancies
+	var sizeDiscrepancies []SizeDiscrepancy
+	if entropyInfo != nil {
+		sizeDiscrepancies = CheckSizeDiscrepancies(entropyInfo.Sections)
+	}
+
+	// Detect overlay
+	overlay, err := target.DetectOverlay()
+	if err != nil {
+		overlay = nil
+	}
+
+	// Analyze stub intelligence
+	stubIntel, err := target.AnalyzeStub()
+	if err != nil {
+		stubIntel = nil
+	}
+
 	return &AnalysisResult{
-		FilePath:        filePath,
-		EntropyInfo:     entropyInfo,
-		Matches:         matches,
-		ScanMode:        mode,
-		TotalSignatures: len(s.signatures),
+		FilePath:          filePath,
+		EntropyInfo:       entropyInfo,
+		Matches:           matches,
+		ScanMode:          mode,
+		TotalSignatures:   len(s.signatures),
+		EntropyAnomalies:  anomalies,
+		SizeDiscrepancies: sizeDiscrepancies,
+		Overlay:           overlay,
+		StubIntelligence:  stubIntel,
 	}, nil
 }
 
