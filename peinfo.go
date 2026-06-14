@@ -23,16 +23,20 @@ func OpenPETarget(path string) (*PETarget, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open PE file: %w", err)
 	}
-	// Note: pe.NewFile reads from f, we keep the file open for raw reads
 	peFile, err := pe.NewFile(f)
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("parse PE: %w", err)
 	}
 
-	entryPoint := peFile.OptionalHeader.(*pe.OptionalHeader64).AddressOfEntryPoint
-	if peFile.Machine == pe.IMAGE_FILE_MACHINE_I386 {
-		entryPoint = peFile.OptionalHeader.(*pe.OptionalHeader32).AddressOfEntryPoint
+	var entryPoint uint32
+	switch opt := peFile.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		entryPoint = opt.AddressOfEntryPoint
+	case *pe.OptionalHeader64:
+		entryPoint = opt.AddressOfEntryPoint
+	default:
+		return nil, fmt.Errorf("unsupported optional header type")
 	}
 
 	return &PETarget{

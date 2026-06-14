@@ -21,7 +21,6 @@ type Signature struct {
 // Pattern example: "55 8B EC 6A FF 68 ?? ?? ?? ??"
 // Wildcards can be "??" or "?".
 func NewSignature(name, pattern string, epOnly bool) (*Signature, error) {
-	// Normalize: replace commas, multiple spaces
 	pattern = strings.TrimSpace(pattern)
 	pattern = strings.ReplaceAll(pattern, ",", "")
 	fields := strings.Fields(pattern)
@@ -30,19 +29,21 @@ func NewSignature(name, pattern string, epOnly bool) (*Signature, error) {
 	mask := make([]byte, 0, len(fields))
 
 	for _, f := range fields {
-		if f == "??" || f == "?" || f == "???" {
+		// Any token containing '?' is a wildcard byte
+		if strings.Contains(f, "?") {
 			values = append(values, 0x00)
 			mask = append(mask, 0x00)
-		} else if len(f) == 2 {
-			b, err := hex.DecodeString(f)
-			if err != nil {
-				return nil, fmt.Errorf("invalid hex byte %q in pattern %s: %w", f, name, err)
-			}
-			values = append(values, b[0])
-			mask = append(mask, 0xFF)
-		} else {
-			return nil, fmt.Errorf("invalid pattern token %q in %s", f, name)
+			continue
 		}
+		if len(f) != 2 {
+			return nil, fmt.Errorf("invalid token %q (expected 2 hex digits or wildcard)", f)
+		}
+		b, err := hex.DecodeString(f)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hex byte %q: %w", f, err)
+		}
+		values = append(values, b[0])
+		mask = append(mask, 0xFF)
 	}
 
 	return &Signature{
