@@ -16,17 +16,25 @@
 
 ## 📦 Installation
 
-To add `peanalyzer` to your project, simply import it:
+`peanalyzer` is a **library** (not a standalone executable). To use it in your own Go project:
 
-```bash
-go install github.com/eyobed101/peanalyzer@latest
-```
+1. **Create or navigate to your Go application** (it must have a `go.mod` file).  
+   If you don't have one yet, initialize it:
+   ```bash
+   go mod init myapp
+   ```
 
-Then, import it in your code:
+2. **Import the package** in your `.go` code:
+   ```go
+   import "github.com/eyobed101/peanalyzer"
+   ```
 
-```go
-import "github.com/eyobed101/peanalyzer"
-```
+3. **Run `go mod tidy`** – this automatically downloads the library and adds it as a dependency:
+   ```bash
+   go mod tidy
+   ```
+
+That's it. There is no need to run `go install` on a library.
 
 ## 📄 Signature Database
 
@@ -164,3 +172,5 @@ This project is licensed under the MIT License – see the [LICENSE](LICENSE) fi
 *   [peid-python](https://github.com/CrackerCat/peid-python) – For providing a comprehensive, up‑to‑date signature database.
 *   [pefile](https://github.com/erocarrera/pefile) – A Python library that heavily inspired the PE parsing logic in this package.
 *   [Exeinfo PE](http://exeinfo.atwebpages.com/) – For maintaining a rich signature database.
+
+
