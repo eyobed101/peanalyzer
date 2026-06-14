@@ -56,53 +56,135 @@ Here's a basic example of how to integrate `peanalyzer` into your application:
 package main
 
 import (
-    "encoding/json"
-    "fmt"
-    "log"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 
-    "github.com/eyobed101/peanalyzer"
+	"github.com/eyobed101/peanalyzer"
 )
 
+var (
+	// Command line flags
+	sigFile    = flag.String("sig", "userdb.txt", "Path to PEiD signature file (userdb.txt)")
+	mode       = flag.String("mode", "all_sections", "Scan mode: ep_only, all_sections, raw")
+	outputJSON = flag.Bool("json", false, "Output result in JSON format")
+	help       = flag.Bool("help", false, "Show this help message")
+	version    = flag.Bool("version", false, "Show version information")
+)
+
+const versionStr = "peanalyzer-cli v1.0.0"
+
 func main() {
-    // 1. Load the signature database
-    sigPath := "userdb.txt"
-    signatures, err := peanalyzer.LoadSignaturesFromFile(sigPath)
-    if err != nil {
-        log.Printf("Warning: could not load signatures: %v", err)
-        // The scanner can still perform entropy analysis without signatures
-        signatures = []peanalyzer.Signature{}
-    }
+	flag.Usage = usage
+	flag.Parse()
 
-    // 2. Create a scanner
-    scanner := peanalyzer.NewScanner(signatures)
+	if *help {
+		usage()
+		os.Exit(0)
+	}
 
-    // 3. Scan a PE file
-    result, err := scanner.ScanFileWithMode("sample.exe", "all_sections")
-    if err != nil {
-        log.Fatal(err)
-    }
+	if *version {
+		fmt.Println(versionStr)
+		os.Exit(0)
+	}
 
-    // 4. Use the detailed output
-    fmt.Printf("File: %s\n", result.FilePath)
-    fmt.Printf("Overall entropy: %.4f (max 8.0)\n", result.EntropyInfo.FileEntropy)
+	// Validate arguments
+	if flag.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Error: missing PE file path")
+		usage()
+		os.Exit(1)
+	}
+	peFile := flag.Arg(0)
 
-    // Print section entropy
-    fmt.Println("\nSections:")
-    for _, sec := range result.EntropyInfo.Sections {
-        fmt.Printf("  %-8s : entropy %.4f (size: %d bytes)\n", sec.Name, sec.Entropy, sec.RawSize)
-    }
+	// Validate mode
+	validModes := map[string]bool{"ep_only": true, "all_sections": true, "raw": true}
+	if !validModes[*mode] {
+		fmt.Fprintf(os.Stderr, "Error: invalid mode '%s'. Must be one of: ep_only, all_sections, raw\n", *mode)
+		os.Exit(1)
+	}
 
-    // Print signature matches
-    fmt.Printf("\nMatched signatures (%d):\n", len(result.Matches))
-    for _, match := range result.Matches {
-        fmt.Printf("  [+] %s at RVA 0x%X (offset 0x%X) in section %s\n",
-            match.SignatureName, match.RVA, match.Offset, match.SectionName)
-    }
+	// Load signatures (optional, continue if file missing)
+	var signatures []peanalyzer.Signature
+	if _, err := os.Stat(*sigFile); err == nil {
+		sigs, err := peanalyzer.LoadSignaturesFromFile(*sigFile)
+		if err != nil {
+			log.Printf("Warning: failed to load signatures from %s: %v\n", *sigFile, err)
+		} else {
+			signatures = sigs
+			log.Printf("Loaded %d signatures from %s\n", len(signatures), *sigFile)
+		}
+	} else {
+		log.Printf("Signature file %s not found. Continuing with entropy only.\n", *sigFile)
+	}
 
-    // Optionally, output as JSON
-    output, _ := json.MarshalIndent(result, "", "  ")
-    fmt.Println(string(output))
+	// Create scanner and analyze
+	scanner := peanalyzer.NewScanner(signatures)
+	result, err := scanner.ScanFileWithMode(peFile, *mode)
+	if err != nil {
+		log.Fatalf("Analysis failed: %v", err)
+	}
+
+	// Output
+	if *outputJSON {
+		jsonData, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			log.Fatalf("JSON marshaling failed: %v", err)
+		}
+		fmt.Println(string(jsonData))
+	} else {
+		printHumanReadable(result)
+	}
 }
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `Usage: %s [options] <PE-file>
+
+Analyzes Windows PE files: computes entropy and matches PEiD signatures.
+
+Options:
+  -sig <file>     Path to signature database (default: userdb.txt)
+  -mode <mode>    Scan mode: ep_only, all_sections, raw (default: all_sections)
+  -json           Output result as JSON
+  -help           Show this help message
+  -version        Show version
+
+Examples:
+  %[1]s sample.exe
+  %[1]s -sig /path/to/userdb.txt -mode ep_only sample.exe
+  %[1]s -json -mode all_sections packed.exe > report.json
+
+`, filepath.Base(os.Args[0]))
+}
+
+func printHumanReadable(result *peanalyzer.AnalysisResult) {
+	fmt.Printf("File: %s\n", result.FilePath)
+	fmt.Printf("Scan mode: %s\n", result.ScanMode)
+	fmt.Printf("Signatures loaded: %d\n", result.TotalSignatures)
+	fmt.Printf("\n=== Entropy Analysis ===\n")
+	fmt.Printf("Overall file entropy: %.4f (max 8.0)\n", result.EntropyInfo.FileEntropy)
+	for _, sec := range result.EntropyInfo.Sections {
+		fmt.Printf("  %-10s : entropy %.4f  (size: %d bytes, raw: %d bytes)\n",
+			sec.Name, sec.Entropy, sec.VirtualSize, sec.RawSize)
+	}
+
+	fmt.Printf("\n=== Signature Matches (%d) ===\n", len(result.Matches))
+	if len(result.Matches) == 0 {
+		fmt.Println("  None")
+	} else {
+		for _, match := range result.Matches {
+			fmt.Printf("  [+] %s\n", match.SignatureName)
+			fmt.Printf("      at RVA 0x%X (file offset 0x%X) in section %s\n",
+				match.RVA, match.Offset, match.SectionName)
+			if match.EpOnly {
+				fmt.Printf("      (ep_only signature)\n")
+			}
+		}
+	}
+}
+
 ```
 
 ### Available Scan Modes
