@@ -19,7 +19,7 @@
 To add `peanalyzer` to your project, simply import it:
 
 ```bash
-go get github.com/yourusername/peanalyzer
+go get github.com/eyobed101/peanalyzer
 ```
 
 Then, import it in your code:
@@ -52,7 +52,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/yourusername/peanalyzer"
+    "github.com/eyobed101/peanalyzer"
 )
 
 func main() {
