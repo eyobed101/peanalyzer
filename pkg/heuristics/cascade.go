@@ -1,32 +1,32 @@
-package peanalyzer
+package heuristics
 
 import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/eyobed101/peanalyzer/pkg/pe"
+	"github.com/eyobed101/peanalyzer/pkg/signatures"
 )
 
-// PackingLayer represents a single packing/encryption layer detected in a section.
 type PackingLayer struct {
-	SectionName   string  `json:"section_name"`
-	SignatureName string  `json:"signature_name"`
-	Offset        int64   `json:"offset"`
-	Entropy       float64 `json:"entropy"`
-	LayerNumber   int     `json:"layer_number"`
-	Category      string  `json:"category,omitempty"`
-	Confidence    float64 `json:"confidence,omitempty"`
-	Length        int     `json:"length,omitempty"`
+	SectionName	string	`json:"section_name"`
+	SignatureName	string	`json:"signature_name"`
+	Offset		int64	`json:"offset"`
+	Entropy		float64	`json:"entropy"`
+	LayerNumber	int	`json:"layer_number"`
+	Category	string	`json:"category,omitempty"`
+	Confidence	float64	`json:"confidence,omitempty"`
+	Length		int	`json:"length,omitempty"`
 }
 
-// CascadingResult contains results of cascading packer analysis.
 type CascadingResult struct {
-	IsCascading bool           `json:"is_cascading"`
-	Layers      []PackingLayer `json:"layers"`
-	Description string         `json:"description"`
-	TotalLayers int            `json:"total_layers"`
+	IsCascading	bool		`json:"is_cascading"`
+	Layers		[]PackingLayer	`json:"layers"`
+	Description	string		`json:"description"`
+	TotalLayers	int		`json:"total_layers"`
 }
 
-// isPackerSignature returns true if the signature name indicates a packer/crypter/protector.
 func isPackerSignature(name string) bool {
 	lower := strings.ToLower(name)
 	keywords := []string{
@@ -42,13 +42,11 @@ func isPackerSignature(name string) bool {
 	return false
 }
 
-// DetectCascadingPacking scans all sections for packer signatures and reports multi‑layer packing.
-func (p *PETarget) DetectCascadingPacking(signatures []Signature) (*CascadingResult, error) {
+func DetectCascadingPacking(p *pe.PETarget, sigs []signatures.Signature) (*CascadingResult, error) {
 	var allLayers []PackingLayer
 
-	// Compute maxLen of all signatures to compute confidence
 	maxLen := 0
-	for _, sig := range signatures {
+	for _, sig := range sigs {
 		if sig.Length > maxLen {
 			maxLen = sig.Length
 		}
@@ -62,16 +60,16 @@ func (p *PETarget) DetectCascadingPacking(signatures []Signature) (*CascadingRes
 		if err != nil || len(data) == 0 {
 			continue
 		}
-		entropy := CalculateEntropy(data)
+		entropy := pe.CalculateEntropy(data)
 
 		var sectionMatches []PackingLayer
 		seen := make(map[string]bool)
 
-		for _, sig := range signatures {
+		for _, sig := range sigs {
 			if sig.Length < 8 {
 				continue
 			}
-			// Only packer category
+
 			if sig.Category != "packer" {
 				continue
 			}
@@ -84,7 +82,6 @@ func (p *PETarget) DetectCascadingPacking(signatures []Signature) (*CascadingRes
 					}
 					seen[key] = true
 
-					// Compute confidence for packer signature
 					factorEpOnly := 0.8
 					if sig.EpOnly {
 						factorEpOnly = 1.0
@@ -92,26 +89,24 @@ func (p *PETarget) DetectCascadingPacking(signatures []Signature) (*CascadingRes
 					confidence := (float64(sig.Length) / float64(maxLen)) * 1.0 * factorEpOnly
 
 					sectionMatches = append(sectionMatches, PackingLayer{
-						SectionName:   section.Name,
-						SignatureName: sig.Name,
-						Offset:        int64(section.Offset) + int64(offset),
-						Entropy:       entropy,
-						Category:      sig.Category,
-						Confidence:    confidence,
-						Length:        sig.Length,
+						SectionName:	section.Name,
+						SignatureName:	sig.Name,
+						Offset:		int64(section.Offset) + int64(offset),
+						Entropy:	entropy,
+						Category:	sig.Category,
+						Confidence:	confidence,
+						Length:		sig.Length,
 					})
-					// Break after first match in this section for this signature
+
 					break
 				}
 			}
 		}
 
-		// Sort sectionMatches by offset ascending
 		sort.Slice(sectionMatches, func(i, j int) bool {
 			return sectionMatches[i].Offset < sectionMatches[j].Offset
 		})
 
-		// Ensure monotonically increasing offset within the section
 		var monotonicMatches []PackingLayer
 		var lastOffset int64 = -1
 		for _, m := range sectionMatches {
@@ -121,7 +116,6 @@ func (p *PETarget) DetectCascadingPacking(signatures []Signature) (*CascadingRes
 			}
 		}
 
-		// Keep only the highest confidence match per section. Use entropy + length as tie-breaker.
 		if len(monotonicMatches) > 0 {
 			best := monotonicMatches[0]
 			for _, m := range monotonicMatches[1:] {
@@ -137,12 +131,10 @@ func (p *PETarget) DetectCascadingPacking(signatures []Signature) (*CascadingRes
 		}
 	}
 
-	// Sort selected layers across all sections by offset ascending
 	sort.Slice(allLayers, func(i, j int) bool {
 		return allLayers[i].Offset < allLayers[j].Offset
 	})
 
-	// Remove duplicate layers where offset delta < 16 bytes
 	var filteredLayers []PackingLayer
 	var lastOffset int64 = -1
 	for _, l := range allLayers {
@@ -155,13 +147,11 @@ func (p *PETarget) DetectCascadingPacking(signatures []Signature) (*CascadingRes
 	totalLayers := len(filteredLayers)
 	isCascading := totalLayers > 1
 
-	// Cap display layers to first 5
 	displayLayers := filteredLayers
 	if totalLayers > 5 {
 		displayLayers = filteredLayers[:5]
 	}
 
-	// Re-number the layer numbers
 	for idx := range displayLayers {
 		displayLayers[idx].LayerNumber = idx + 1
 	}
@@ -177,9 +167,9 @@ func (p *PETarget) DetectCascadingPacking(signatures []Signature) (*CascadingRes
 	}
 
 	return &CascadingResult{
-		IsCascading: isCascading,
-		Layers:      displayLayers,
-		Description: desc,
-		TotalLayers: totalLayers,
+		IsCascading:	isCascading,
+		Layers:		displayLayers,
+		Description:	desc,
+		TotalLayers:	totalLayers,
 	}, nil
 }
